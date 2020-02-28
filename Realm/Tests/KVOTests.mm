@@ -1349,6 +1349,10 @@ public:
     return [KVOLinkObject2 createInRealm:_realm withValue:@[@(++pk), @[@(++pk), [self createObject], @[]], @[]]];
 }
 
+- (EmbeddedIntParentObject *)createEmbeddedObject {
+    return [EmbeddedIntParentObject createInRealm:_realm withValue:@[@[@1]]];
+}
+
 - (void)testDeleteObservedObject {
     KVOObject *obj = [self createObject];
     KVORecorder r1(self, obj, @"boolCol");
@@ -1536,6 +1540,16 @@ public:
         AssertNotification(r);
     }
 }
+
+- (void)testDeleteParentOfObservedEmbeddedObject {
+    EmbeddedIntParentObject *obj = [self createEmbeddedObject];
+    KVORecorder r1(self, obj, @"object");
+    KVORecorder r2(self, obj, @"object.invalidated");
+    KVORecorder r3(self, obj.object, RLMInvalidatedKey);
+    [self.realm deleteObject:obj];
+    AssertChanged(r2, @NO, @YES);
+    AssertChanged(r3, @NO, @YES);
+}
 @end
 
 // Mutate a different accessor backed by the same row as the accessor being observed
@@ -1543,8 +1557,8 @@ public:
 @end
 @implementation KVOMultipleAccessorsTests
 - (id)observableForObject:(id)value {
-    if (RLMObject *obj = RLMDynamicCast<RLMObject>(value)) {
-        RLMObject *copy = RLMCreateManagedAccessor(obj.objectSchema.accessorClass, obj->_info);
+    if (RLMObjectBase *obj = RLMDynamicCast<RLMObjectBase>(value)) {
+        RLMObject *copy = RLMCreateManagedAccessor(RLMObjectBaseObjectSchema(obj).accessorClass, obj->_info);
         copy->_row = obj->_row;
         return copy;
     }
@@ -1892,9 +1906,10 @@ public:
     [self.realm beginWriteTransaction];
     [self.secondaryRealm refresh];
 
-    if (RLMObject *obj = RLMDynamicCast<RLMObject>(value)) {
-        RLMObject *copy = RLMCreateManagedAccessor(obj.objectSchema.accessorClass,
-                                                   &self.secondaryRealm->_info[obj.objectSchema.className]);
+    if (RLMObjectBase *obj = RLMDynamicCast<RLMObjectBase>(value)) {
+        RLMObjectSchema *objectSchema = RLMObjectBaseObjectSchema(obj);
+        RLMObject *copy = RLMCreateManagedAccessor(objectSchema.accessorClass,
+                                                   &self.secondaryRealm->_info[objectSchema.className]);
         copy->_row = (*copy->_info->table()).get_object(obj->_row.get_key());
         return copy;
     }

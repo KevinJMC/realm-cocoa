@@ -114,6 +114,16 @@ RLM_ARRAY_TYPE(IntObject)
 @property NSURL *url;
 @end
 
+@interface EmbeddedIntObject : RLMEmbeddedObject
+@property int intCol;
+@end
+RLM_ARRAY_TYPE(EmbeddedIntObject)
+
+@interface EmbeddedIntParentObject : RLMObject
+@property EmbeddedIntObject *object;
+@property RLMArray<EmbeddedIntObject> *array;
+@end
+
 #pragma mark AllTypesObject
 
 @interface AllTypesObject : RLMObject
@@ -476,4 +486,7 @@ RLM_ARRAY_TYPE(RenamedProperties2)
 #pragma mark FakeObject
 
 @interface FakeObject : RLMObject
+@end
+
+@interface FakeEmbeddedObject : RLMEmbeddedObject
 @end

@@ -32,8 +32,8 @@ class ObjectWithPrivateOptionals: Object {
 }
 
 class ObjectCreationTests: TestCase {
+    // MARK: - Init tests
 
-    // MARK: Init tests
     func testInitWithDefaults() {
         // test all properties are defaults
         let object = SwiftObject()
@@ -171,7 +171,7 @@ class ObjectCreationTests: TestCase {
         _ = SwiftObjcArbitrarilyRenamedObject()
     }
 
-    // MARK: Creation tests
+    // MARK: - Creation tests
 
     func testCreateWithDefaults() {
         let realm = try! Realm()
@@ -738,10 +738,108 @@ class ObjectCreationTests: TestCase {
         }
     }
 
+    func testDynamicCreateEmbeddedDirectly() {
+        let realm = try! Realm()
+        realm.beginWrite()
+        assertThrows(realm.dynamicCreate("EmbeddedTreeObject", value: []),
+                     reasonMatching: "Embedded objects cannot be created directly")
+        realm.cancelWrite()
+    }
+
+    func testCreateEmbeddedWithDictionary() {
+        let realm = try! Realm()
+        realm.beginWrite()
+        let parent = realm.create(EmbeddedParentObject.self, value: [
+            "object": ["value": 5, "child": ["value": 6], "children": [[7], [8]]],
+            "array": [[9], [10]]
+        ])
+        XCTAssertEqual(parent.object!.value, 5)
+        XCTAssertEqual(parent.object!.child!.value, 6)
+        XCTAssertEqual(parent.object!.children.count, 2)
+        XCTAssertEqual(parent.object!.children[0].value, 7)
+        XCTAssertEqual(parent.object!.children[1].value, 8)
+        XCTAssertEqual(parent.array.count, 2)
+        XCTAssertEqual(parent.array[0].value, 9)
+        XCTAssertEqual(parent.array[1].value, 10)
+        realm.cancelWrite()
+    }
+
+    func testCreateEmbeddedWithUnmanagedObjects() {
+        let sourceObject = EmbeddedParentObject()
+        sourceObject.object = EmbeddedTreeObject(value: [5])
+        sourceObject.object!.child = EmbeddedTreeObject(value: [6])
+        sourceObject.object!.children.append(EmbeddedTreeObject(value: [7]))
+        sourceObject.object!.children.append(EmbeddedTreeObject(value: [8]))
+        sourceObject.array.append(EmbeddedTreeObject(value: [9]))
+        sourceObject.array.append(EmbeddedTreeObject(value: [10]))
+
+        let realm = try! Realm()
+        realm.beginWrite()
+        let parent = realm.create(EmbeddedParentObject.self, value: sourceObject)
+        XCTAssertNil(sourceObject.realm)
+        XCTAssertEqual(parent.object!.value, 5)
+        XCTAssertEqual(parent.object!.child!.value, 6)
+        XCTAssertEqual(parent.object!.children.count, 2)
+        XCTAssertEqual(parent.object!.children[0].value, 7)
+        XCTAssertEqual(parent.object!.children[1].value, 8)
+        XCTAssertEqual(parent.array.count, 2)
+        XCTAssertEqual(parent.array[0].value, 9)
+        XCTAssertEqual(parent.array[1].value, 10)
+        realm.cancelWrite()
+    }
+
+    func testCreateEmbeddedFromManagedObjectInSameRealm() {
+        let realm = try! Realm()
+        realm.beginWrite()
+        let parent = realm.create(EmbeddedParentObject.self, value: [
+            "object": ["value": 5, "child": ["value": 6], "children": [[7], [8]]],
+            "array": [[9], [10]]
+        ])
+        let copy = realm.create(EmbeddedParentObject.self, value: parent)
+        XCTAssertNotEqual(parent, copy)
+        XCTAssertEqual(copy.object!.value, 5)
+        XCTAssertEqual(copy.object!.child!.value, 6)
+        XCTAssertEqual(copy.object!.children.count, 2)
+        XCTAssertEqual(copy.object!.children[0].value, 7)
+        XCTAssertEqual(copy.object!.children[1].value, 8)
+        XCTAssertEqual(copy.array.count, 2)
+        XCTAssertEqual(copy.array[0].value, 9)
+        XCTAssertEqual(copy.array[1].value, 10)
+        realm.cancelWrite()
+    }
+
+    func testCreateEmbeddedFromManagedObjectInDifferentRealm() {
+        let realmA = realmWithTestPath()
+        let realmB = try! Realm()
+        realmA.beginWrite()
+        let parent = realmA.create(EmbeddedParentObject.self, value: [
+            "object": ["value": 5, "child": ["value": 6], "children": [[7], [8]]],
+            "array": [[9], [10]]
+        ])
+        try! realmA.commitWrite()
+
+        realmB.beginWrite()
+        let copy = realmB.create(EmbeddedParentObject.self, value: parent)
+        XCTAssertNotEqual(parent, copy)
+        XCTAssertEqual(copy.object!.value, 5)
+        XCTAssertEqual(copy.object!.child!.value, 6)
+        XCTAssertEqual(copy.object!.children.count, 2)
+        XCTAssertEqual(copy.object!.children[0].value, 7)
+        XCTAssertEqual(copy.object!.children[1].value, 8)
+        XCTAssertEqual(copy.array.count, 2)
+        XCTAssertEqual(copy.array[0].value, 9)
+        XCTAssertEqual(copy.array[1].value, 10)
+        realmB.cancelWrite()
+    }
+
+    // Add
+    // List mutation
+    // link assignment
+
     // test null object
     // test null list
 
-    // MARK: Add tests
+    // MARK: - Add tests
     func testAddWithExisingNestedObjects() {
         try! Realm().beginWrite()
         let existingObject = try! Realm().create(SwiftBoolObject.self)
@@ -756,6 +854,80 @@ class ObjectCreationTests: TestCase {
 
         assertEqual(object.objectCol, existingObject)
     }
+
+    func testAddEmbedded() {
+        let objects = (0..<6).map { EmbeddedTreeObject(value: [$0]) }
+        let parent = EmbeddedParentObject()
+        parent.object = objects[0]
+        parent.object!.child = objects[1]
+        parent.object!.children.append(objects[2])
+        parent.object!.children.append(objects[3])
+        parent.array.append(objects[4])
+        parent.array.append(objects[5])
+
+        let realm = try! Realm()
+        realm.beginWrite()
+        realm.add(parent)
+        for (i, object) in objects.enumerated() {
+            XCTAssertEqual(object.realm, realm)
+            XCTAssertEqual(object.value, i)
+        }
+        XCTAssertEqual(parent.object!.value, 0)
+        XCTAssertEqual(parent.object!.child!.value, 1)
+        XCTAssertEqual(parent.object!.children.count, 2)
+        XCTAssertEqual(parent.object!.children[0].value, 2)
+        XCTAssertEqual(parent.object!.children[1].value, 3)
+        XCTAssertEqual(parent.array.count, 2)
+        XCTAssertEqual(parent.array[0].value, 4)
+        XCTAssertEqual(parent.array[1].value, 5)
+        realm.cancelWrite()
+    }
+
+    #if false
+    func testCreateEmbeddedFromManagedObjectInSameRealm() {
+        let realm = try! Realm()
+        realm.beginWrite()
+        let parent = realm.create(EmbeddedParentObject.self, value: [
+            "object": ["value": 5, "child": ["value": 6], "children": [[7], [8]]],
+            "array": [[9], [10]]
+        ])
+        let copy = realm.create(EmbeddedParentObject.self, value: parent)
+        XCTAssertNotEqual(parent, copy)
+        XCTAssertEqual(copy.object!.value, 5)
+        XCTAssertEqual(copy.object!.child!.value, 6)
+        XCTAssertEqual(copy.object!.children.count, 2)
+        XCTAssertEqual(copy.object!.children[0].value, 7)
+        XCTAssertEqual(copy.object!.children[1].value, 8)
+        XCTAssertEqual(copy.array.count, 2)
+        XCTAssertEqual(copy.array[0].value, 9)
+        XCTAssertEqual(copy.array[1].value, 10)
+        realm.cancelWrite()
+    }
+
+    func testCreateEmbeddedFromManagedObjectInDifferentRealm() {
+        let realmA = realmWithTestPath()
+        let realmB = try! Realm()
+        realmA.beginWrite()
+        let parent = realmA.create(EmbeddedParentObject.self, value: [
+            "object": ["value": 5, "child": ["value": 6], "children": [[7], [8]]],
+            "array": [[9], [10]]
+        ])
+        try! realmA.commitWrite()
+
+        realmB.beginWrite()
+        let copy = realmB.create(EmbeddedParentObject.self, value: parent)
+        XCTAssertNotEqual(parent, copy)
+        XCTAssertEqual(copy.object!.value, 5)
+        XCTAssertEqual(copy.object!.child!.value, 6)
+        XCTAssertEqual(copy.object!.children.count, 2)
+        XCTAssertEqual(copy.object!.children[0].value, 7)
+        XCTAssertEqual(copy.object!.children[1].value, 8)
+        XCTAssertEqual(copy.array.count, 2)
+        XCTAssertEqual(copy.array[0].value, 9)
+        XCTAssertEqual(copy.array[1].value, 10)
+        realmB.cancelWrite()
+    }
+    #endif
 
     func testAddAndUpdateWithExisingNestedObjects() {
         try! Realm().beginWrite()
@@ -1014,7 +1186,7 @@ class ObjectCreationTests: TestCase {
         }
     }
 
-    // MARK: Private utilities
+    // MARK: - Private utilities
     private func verifySwiftObjectWithArrayLiteral(_ object: SwiftObject, array: [Any], boolObjectValue: Bool,
                                                    boolObjectListValues: [Bool]) {
         XCTAssertEqual(object.boolCol, (array[0] as! Bool))

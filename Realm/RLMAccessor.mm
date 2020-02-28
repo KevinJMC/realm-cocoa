@@ -634,15 +634,18 @@ id RLMDynamicGetByName(__unsafe_unretained RLMObjectBase *const obj,
     return RLMDynamicGet(obj, prop);
 }
 
-RLMAccessorContext::RLMAccessorContext(RLMAccessorContext& parent, realm::Property const& property)
+RLMAccessorContext::RLMAccessorContext(RLMAccessorContext& parent, realm::Obj const& obj,
+                                       realm::Property const& property)
 : _realm(parent._realm)
 , _info(property.type == realm::PropertyType::Object ? parent._info.linkTargetType(property) : parent._info)
-, _promote_existing(parent._promote_existing)
+, _parentObject(obj)
+, _parentObjectInfo(&parent._info)
+, _colKey(property.column_key)
 {
 }
 
-RLMAccessorContext::RLMAccessorContext(RLMClassInfo& info, bool promote)
-: _realm(info.realm), _info(info), _promote_existing(promote)
+RLMAccessorContext::RLMAccessorContext(RLMClassInfo& info)
+: _realm(info.realm), _info(info)
 {
 }
 
@@ -651,7 +654,7 @@ RLMAccessorContext::RLMAccessorContext(__unsafe_unretained RLMObjectBase *const 
 : _realm(parent->_realm)
 , _info(prop && prop->type == realm::PropertyType::Object ? parent->_info->linkTargetType(*prop)
                                                           : *parent->_info)
-, _parentObject(parent)
+, _parentObjectInfo(parent->_info)
 {
 }
 
@@ -692,11 +695,18 @@ id RLMAccessorContext::propertyValue(__unsafe_unretained id const obj, size_t pr
     return value ?: NSNull.null;
 }
 
+realm::Obj RLMAccessorContext::create_embedded_object() {
+    if (!_parentObject) {
+        @throw RLMException(@"Embedded objects cannot be created directly");
+    }
+    return _parentObject.create_and_set_linked_object(_colKey);
+}
+
 id RLMAccessorContext::box(realm::List&& l) {
-    REALM_ASSERT(_parentObject);
+    REALM_ASSERT(_parentObjectInfo);
     REALM_ASSERT(currentProperty);
     return [[RLMManagedArray alloc] initWithList:std::move(l)
-                                      parentInfo:_parentObject->_info
+                                      parentInfo:_parentObjectInfo
                                         property:currentProperty];
 }
 
@@ -786,49 +796,103 @@ realm::util::Optional<realm::ObjectId> RLMAccessorContext::unbox(__unsafe_unreta
     return to_optional(v, [&](__unsafe_unretained RLMObjectId *v) { return v.value; });
 }
 
-template<>
-realm::Obj RLMAccessorContext::unbox(__unsafe_unretained id const v, CreatePolicy createPolicy, ObjKey) {
-    bool create = createPolicy != CreatePolicy::Skip;
-    auto policy = static_cast<RLMUpdatePolicy>(createPolicy);
-    RLMObjectBase *link = RLMDynamicCast<RLMObjectBase>(v);
-    if (!link) {
-        if (!create)
-            return realm::Obj();
-        return RLMCreateObjectInRealmWithValue(_realm, _info.rlmObjectSchema.className, v, policy)->_row;
+realm::Obj RLMAccessorContext::createObject(id value, realm::CreatePolicy policy, bool forceCreate, ObjKey existingKey) {
+    if (!value || value == NSNull.null) {
+        @throw RLMException(@"Must provide a non-nil value.");
     }
 
-    if (link.isInvalidated) {
-        if (create) {
-            @throw RLMException(@"Adding a deleted or invalidated object to a Realm is not permitted");
+    if ([value isKindOfClass:[NSArray class]] && [value count] > _info.objectSchema->persisted_properties.size()) {
+        @throw RLMException(@"Invalid array input: more values (%llu) than properties (%llu).",
+                            (unsigned long long)[value count],
+                            (unsigned long long)_info.objectSchema->persisted_properties.size());
+    }
+
+    RLMObjectBase *objBase = RLMDynamicCast<RLMObjectBase>(value);
+    realm::Obj obj, *outObj = nullptr;
+    if (objBase) {
+        if (objBase.isInvalidated) {
+            if (policy.create && !policy.copy) {
+                @throw RLMException(@"Adding a deleted or invalidated object to a Realm is not permitted");
+            }
+            else {
+                @throw RLMException(@"Object has been deleted or invalidated.");
+            }
+        }
+        if (policy.copy) {
+            if (policy.update || !forceCreate) {
+                // create(update: true) is a no-op when given an object already in
+                // the Realm which is of the correct type
+                if (objBase->_realm == _realm && objBase->_row.get_table() == _info.table() && !_info.table()->is_embedded()) {
+                    return objBase->_row;
+                }
+            }
+            // Otherwise we copy the object
+            objBase = nil;
         }
         else {
-            @throw RLMException(@"Object has been invalidated");
+            outObj = &objBase->_row;
+            if (objBase->_realm == _realm)
+                return objBase->_row;
+            else if (!policy.create) {
+                return realm::Obj();
+            }
+            else if (objBase->_realm)
+                @throw RLMException(@"Object is already managed by another Realm. Use create instead to copy it into this Realm.");
+            if (objBase->_observationInfo && objBase->_observationInfo->hasObservers()) {
+                @throw RLMException(@"Cannot add an object with observers to a Realm");
+            }
+            // What if different table? Can that happen?
+            // What if dynamic object?
+
+            objBase->_info = &_info;
+            objBase->_realm = _realm;
+            objBase->_objectSchema = _info.rlmObjectSchema;
         }
     }
-
-    if (![link->_objectSchema.className isEqualToString:_info.rlmObjectSchema.className]) {
-        if (create && !_promote_existing)
-            return RLMCreateObjectInRealmWithValue(_realm, _info.rlmObjectSchema.className, link, policy)->_row;
-        return link->_row;
+    if (!policy.create) {
+        return realm::Obj();
+    }
+    if (!outObj) {
+        outObj = &obj;
     }
 
-    if (!link->_realm) {
-        if (!create)
-            return realm::Obj();
-        if (!_promote_existing)
-            return RLMCreateObjectInRealmWithValue(_realm, _info.rlmObjectSchema.className, link, policy)->_row;
-        RLMAddObjectToRealm(link, _realm, policy);
+    try {
+        realm::Object::create(*this, _realm->_realm, *_info.objectSchema,
+                              (id)value, policy, existingKey, outObj).obj();
     }
-    else if (link->_realm != _realm) {
-        if (_promote_existing)
-            @throw RLMException(@"Object is already managed by another Realm. Use create instead to copy it into this Realm.");
-        return RLMCreateObjectInRealmWithValue(_realm, _info.rlmObjectSchema.className, v, policy)->_row;
+    catch (std::exception const& e) {
+        @throw RLMException(e);
     }
-    return link->_row;
+
+    if (objBase) {
+
+        for (RLMProperty *prop in _info.rlmObjectSchema.properties) {
+            // set the ivars for object and array properties to nil as otherwise the
+            // accessors retain objects that are no longer accessible via the properties
+            // this is mainly an issue when the object graph being added has cycles,
+            // as it's not obvious that the user has to set the *ivars* to nil to
+            // avoid leaking memory
+            if (prop.type == RLMPropertyTypeObject && !prop.swiftIvar) {
+                ((void(*)(id, SEL, id))objc_msgSend)(objBase, prop.setterSel, nil);
+            }
+        }
+
+        /*
+         if (_promoteExisting && [obj isKindOfClass:_info.rlmObjectSchema.objectClass] && !prop.swiftIvar) {
+         if (prop.type == RLMPropertyTypeObject) {
+         }
+         }
+         */
+
+        object_setClass(objBase, _info.rlmObjectSchema.accessorClass);
+        RLMInitializeSwiftAccessorGenerics(objBase);
+    }
+    return *outObj;
 }
 
-id RLMAccessorContext::unbox_embedded(id, realm::CreatePolicy, realm::Obj, realm::ColKey, size_t) {
-    REALM_UNREACHABLE();
+template<>
+realm::Obj RLMAccessorContext::unbox(__unsafe_unretained id const v, CreatePolicy policy, ObjKey key) {
+    return createObject(v, policy, false, key);
 }
 
 void RLMAccessorContext::will_change(realm::Obj const& row, realm::Property const& prop) {
@@ -853,17 +917,6 @@ RLMOptionalId RLMAccessorContext::value_for_property(__unsafe_unretained id cons
     id value = propertyValue(obj, propIndex, prop);
     if (value) {
         RLMValidateValueForProperty(value, _info.rlmObjectSchema, prop);
-    }
-
-    if (_promote_existing && [obj isKindOfClass:_info.rlmObjectSchema.objectClass] && !prop.swiftIvar) {
-        // set the ivars for object and array properties to nil as otherwise the
-        // accessors retain objects that are no longer accessible via the properties
-        // this is mainly an issue when the object graph being added has cycles,
-        // as it's not obvious that the user has to set the *ivars* to nil to
-        // avoid leaking memory
-        if (prop.type == RLMPropertyTypeObject) {
-            ((void(*)(id, SEL, id))objc_msgSend)(obj, prop.setterSel, nil);
-        }
     }
 
     return RLMOptionalId{value};
